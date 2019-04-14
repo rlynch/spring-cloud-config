@@ -77,8 +77,8 @@ import static org.eclipse.jgit.transport.ReceiveCommand.Type.DELETE;
  * @author Ryan Lynch
  * @author Gareth Clay
  */
-public class JGitEnvironmentRepository extends AbstractScmEnvironmentRepository
-		implements EnvironmentRepository, SearchPathLocator, InitializingBean {
+public class JGitEnvironmentRepository extends AbstractVersionedScmEnvironmentRepository
+		implements VersionedEnvironmentRepository, SearchPathLocator, InitializingBean {
 
 	public static final String MESSAGE = "You need to configure a uri for the git repository.";
 
@@ -231,15 +231,27 @@ public class JGitEnvironmentRepository extends AbstractScmEnvironmentRepository
 		this.skipSslValidation = skipSslValidation;
 	}
 
+
+	@Override
+	public Locations getLocations(String application, String profile,
+			String label) {
+		return getLocations(application, profile, label, null);
+	}
+
 	@Override
 	public synchronized Locations getLocations(String application, String profile,
-			String label) {
+			String label, String clientVersion) {
 		if (label == null) {
 			label = this.defaultLabel;
 		}
 		String version = refresh(label);
-		return new Locations(application, profile, label, version,
-				getSearchLocations(getWorkingDirectory(), application, profile, label));
+		if(clientVersion != null && clientVersion.equals(version)) {
+			return null;
+		}
+		else {
+			return new Locations(application, profile, label, version,
+					getSearchLocations(getWorkingDirectory(), application, profile, label));
+		}
 	}
 
 	@Override

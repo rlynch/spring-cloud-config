@@ -29,7 +29,9 @@ import org.mockito.Mockito;
 
 import org.springframework.cloud.config.environment.Environment;
 import org.springframework.cloud.config.environment.PropertySource;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
@@ -41,6 +43,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
@@ -50,6 +53,7 @@ import static org.junit.Assert.assertTrue;
  * @author Ivan Corrales Solera
  * @author Daniel Frey
  * @author Ian Bondoc
+ * @author Ryan Lynch
  */
 public class EnvironmentControllerTests {
 
@@ -58,13 +62,18 @@ public class EnvironmentControllerTests {
 
 	private EnvironmentRepository repository = Mockito.mock(EnvironmentRepository.class);
 
+	private VersionedEnvironmentRepository eTagRepository = Mockito.mock(VersionedEnvironmentRepository.class);
+
 	private EnvironmentController controller;
+
+	private EnvironmentController eTagController;
 
 	private Environment environment = new Environment("foo", "master");
 
 	@Before
 	public void init() {
 		this.controller = new EnvironmentController(this.repository);
+		this.eTagController = new EnvironmentController(this.eTagRepository);
 		environment.add(new PropertySource("foo", new HashMap<>()));
 	}
 
@@ -80,7 +89,7 @@ public class EnvironmentControllerTests {
 		this.environment.add(new PropertySource("one", map));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertEquals("a:\n  b:\n    c: d\n", yaml);
 	}
 
@@ -93,7 +102,7 @@ public class EnvironmentControllerTests {
 				new PropertySource("two", Collections.singletonMap("a.b.c", "e")));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertEquals("a:\n  b:\n    c: e\n", yaml);
 	}
 
@@ -110,28 +119,28 @@ public class EnvironmentControllerTests {
 		this.environment.addFirst(new PropertySource("two", map));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertEquals("A: Z\nS: 3\nY: 0\n", yaml);
 	}
 
 	@Test
 	public void placeholdersResolvedInYaml() throws Exception {
 		whenPlaceholders();
-		String yaml = this.controller.yaml("foo", "bar", true).getBody();
+		String yaml = this.controller.yaml("foo", "bar", true, null).getBody();
 		assertEquals("a:\n  b:\n    c: bar\nfoo: bar\n", yaml);
 	}
 
 	@Test
 	public void placeholdersNotResolvedInYaml() throws Exception {
 		whenPlaceholders();
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertEquals("a:\n  b:\n    c: ${foo}\nfoo: bar\n", yaml);
 	}
 
 	@Test
 	public void placeholdersNotResolvedInYamlFromSystemProperties() throws Exception {
 		whenPlaceholdersSystemProps();
-		String yaml = this.controller.yaml("foo", "bar", true).getBody();
+		String yaml = this.controller.yaml("foo", "bar", true, null).getBody();
 		assertEquals("a:\n  b:\n    c: ${foo}\n", yaml);
 	}
 
@@ -139,7 +148,7 @@ public class EnvironmentControllerTests {
 	public void placeholdersNotResolvedInYamlFromSystemPropertiesWhenNotFlagged()
 			throws Exception {
 		whenPlaceholdersSystemProps();
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertEquals("a:\n  b:\n    c: ${foo}\n", yaml);
 	}
 
@@ -147,7 +156,7 @@ public class EnvironmentControllerTests {
 	public void placeholdersNotResolvedInYamlFromSystemPropertiesWhenNotFlaggedWithDefault()
 			throws Exception {
 		whenPlaceholdersSystemPropsWithDefault();
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		// If there is a default value we prevent the placeholder being resolved
 		assertEquals("a:\n  b:\n    c: ${foo:spam}\n", yaml);
 	}
@@ -156,7 +165,7 @@ public class EnvironmentControllerTests {
 	public void placeholdersResolvedInYamlFromSystemPropertiesWhenFlagged()
 			throws Exception {
 		whenPlaceholdersSystemPropsWithDefault();
-		String yaml = this.controller.yaml("foo", "bar", true).getBody();
+		String yaml = this.controller.yaml("foo", "bar", true, null).getBody();
 		// If there is a default value we do not prevent the placeholder being resolved
 		assertEquals("a:\n  b:\n    c: spam\n", yaml);
 	}
@@ -169,9 +178,95 @@ public class EnvironmentControllerTests {
 		this.environment.add(new PropertySource("one", map));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertEquals("a:\n  b:\n  - c\n  - d\n", yaml);
 	}
+
+	private void setupEtagTest(String version, boolean matchVersion) throws Exception {
+		Map<String, Object> map = new LinkedHashMap<String, Object>();
+		map.put("a.b[0]", "c");
+		map.put("a.b[1]", "d");
+		if(!matchVersion) {
+			this.environment.add(new PropertySource("one", map));
+		}
+		this.environment.setVersion(version);
+		if(matchVersion) {
+
+			Mockito.when(this.eTagRepository.findOne("foo", "bar", null, version)).thenReturn(this.environment);
+		}else{
+			Mockito.when(this.eTagRepository.findOne("foo", "bar", null, "NOT" + version)).thenReturn(this.environment);
+			Mockito.when(this.eTagRepository.findOne( "foo", "bar", null )).thenReturn(this.environment);	// Strong or invalid ETag
+		}
+	}
+
+	@Test
+	public void testYamlETag() throws Exception {
+		this.setupEtagTest("abc123", false);
+		ResponseEntity<String> responseEntity = this.eTagController.yaml("foo", "bar", false,
+				EnvironmentController.getWeakEtagFromVersion("NOTabc123"));
+		assertEquals(responseEntity.getHeaders().getETag(), "W/\"abc123\"");
+	}
+
+	@Test
+	public void testYamlIfNoneMatchWithAMatch() throws Exception {
+		this.setupEtagTest("abc123", true);
+		ResponseEntity<String> responseEntity = this.eTagController.yaml("foo", "bar", false,
+				EnvironmentController.getWeakEtagFromVersion("abc123"));
+		assertEquals(responseEntity.getStatusCode(), HttpStatus.NOT_MODIFIED);
+	}
+
+	@Test
+	public void testJsonETag() throws Exception {
+		this.setupEtagTest("abc123", false);
+		ResponseEntity<String> responseEntity = this.eTagController.jsonProperties("foo", "bar", false,
+				EnvironmentController.getWeakEtagFromVersion("NOTabc123"));
+		assertEquals(responseEntity.getHeaders().getETag(), "W/\"abc123\"");
+	}
+
+	@Test
+	public void testJsonIfNoneMatchWithAMatch() throws Exception {
+		this.setupEtagTest("abc123", true);
+		ResponseEntity<String> responseEntity = this.eTagController.jsonProperties("foo", "bar", false,
+				EnvironmentController.getWeakEtagFromVersion("abc123"));
+		assertEquals(responseEntity.getStatusCode(), HttpStatus.NOT_MODIFIED);
+	}
+
+	@Test
+	public void testPropertiesETag() throws Exception {
+		this.setupEtagTest("abc123", false);
+		ResponseEntity<String> responseEntity = this.eTagController.properties("foo", "bar", false,
+				EnvironmentController.getWeakEtagFromVersion("NOTabc123"));
+		assertEquals(responseEntity.getHeaders().getETag(), "W/\"abc123\"");
+	}
+
+	@Test
+	public void testPropertiesIfNoneMatchWithAMatch() throws Exception {
+		this.setupEtagTest("abc123", true);
+		ResponseEntity<String> responseEntity = this.eTagController.properties("foo", "bar", false,
+				EnvironmentController.getWeakEtagFromVersion("abc123"));
+		assertEquals(responseEntity.getStatusCode(), HttpStatus.NOT_MODIFIED);
+	}
+
+	@Test
+	public void testPropertiesIfNoneMatchWithAStrongEtagValue() throws Exception {
+		this.setupEtagTest("abc123", false);
+		ResponseEntity<String> responseEntity = this.eTagController.properties("foo", "bar", false,
+				"\"abc123\"");  // Currently we do not support matching Strong ETags from clients
+		assertNotEquals("We don't currently match on Strong ETags, so 304 cannot be returned",
+				responseEntity.getStatusCode(), HttpStatus.NOT_MODIFIED);
+		assertTrue("We don't currently match on Strong ETags, so body must be returned", responseEntity.hasBody());
+	}
+
+	@Test
+	public void testJSonPropertiesIfNoneMatchWithABogusEtagValue() throws Exception {
+		this.setupEtagTest("abc123", false);
+		ResponseEntity<String> responseEntity = this.eTagController.properties("foo", "bar", false,
+				"abc123");  // Per RFC 7232 section 2.3, etag values MUST BE quoted
+		assertNotEquals("Syntactically incorrect If-None-Match value supplied, so 304 cannot be returned",
+				responseEntity.getStatusCode(), HttpStatus.NOT_MODIFIED);
+		assertTrue("Syntactically incorrect If-None-Match value supplied, so body must be returned", responseEntity.hasBody());
+	}
+
 
 	@Test
 	public void arrayOverridenInEnvironment() throws Exception {
@@ -190,7 +285,7 @@ public class EnvironmentControllerTests {
 
 		Mockito.when(this.repository.findOne("foo", "bar", "two"))
 				.thenReturn(this.environment);
-		Environment environment = this.controller.labelled("foo", "bar", "two");
+		Environment environment = this.controller.labelled("foo", "bar", "two", null).getBody();
 		assertThat(environment, not(nullValue()));
 		assertThat(environment.getName(), equalTo("foo"));
 		assertThat(environment.getProfiles(), equalTo(new String[] { "master" }));
@@ -209,7 +304,7 @@ public class EnvironmentControllerTests {
 	public void testNameWithSlash() {
 		Mockito.when(this.repository.findOne("foo/spam", "bar", "two")).thenReturn(this.environment);
 
-		Environment returnedEnvironment = this.controller.labelled("foo(_)spam", "bar", "two");
+		Environment returnedEnvironment = this.controller.labelled("foo(_)spam", "bar", "two", null).getBody();
 
 		assertEquals(this.environment.getLabel(), returnedEnvironment.getLabel());
 		assertEquals(this.environment.getName(), returnedEnvironment.getName());
@@ -218,13 +313,13 @@ public class EnvironmentControllerTests {
 	@Test(expected=EnvironmentNotFoundException.class)
 	public void testEnvironmentNotFound() {
 		this.controller.setAcceptEmpty(false);
-		this.controller.labelled("foo", "bar", null);
+		this.controller.labelled("foo", "bar", null, null).getBody();
 	}
 	@Test
 	public void testwithValidEnvironment() {
 		Mockito.when(this.repository.findOne("foo", "bar",null))
 				.thenReturn(this.environment);
-		Environment environment = this.controller.labelled("foo", "bar", null);
+		Environment environment = this.controller.labelled("foo", "bar", null, null).getBody();
 		assertThat(environment, not(nullValue()));
 
 	}
@@ -233,7 +328,7 @@ public class EnvironmentControllerTests {
 		
 		Mockito.when(this.repository.findOne("foo", "bar", "two/spam")).thenReturn(this.environment);
 
-		Environment returnedEnvironment = this.controller.labelled("foo", "bar", "two(_)spam");
+		Environment returnedEnvironment = this.controller.labelled("foo", "bar", "two(_)spam", null).getBody();
 
 		assertEquals(this.environment.getLabel(), returnedEnvironment.getLabel());
 		assertEquals(this.environment.getName(), returnedEnvironment.getName());
@@ -256,7 +351,7 @@ public class EnvironmentControllerTests {
 
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 
 		// Result will not contain original, extra values from oneMap
 		assertEquals("a:\n  b:\n  - f\n  - h\n", yaml);
@@ -269,7 +364,7 @@ public class EnvironmentControllerTests {
 		this.environment.add(new PropertySource("one", map));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertEquals("blah\n", yaml);
 	}
 
@@ -281,7 +376,7 @@ public class EnvironmentControllerTests {
 		this.environment.add(new PropertySource("one", map));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertEquals("- c\n- d\n", yaml);
 	}
 
@@ -293,7 +388,7 @@ public class EnvironmentControllerTests {
 		this.environment.add(new PropertySource("one", map));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertEquals("- a: c\n- a: d\n", yaml);
 	}
 
@@ -306,7 +401,7 @@ public class EnvironmentControllerTests {
 		this.environment.add(new PropertySource("one", map));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertTrue("Wrong output: " + yaml,
 				"a:\n  b:\n  - d: e\n    c: d\n  - c: d\n".equals(yaml)
 						|| "a:\n  b:\n  - c: d\n    d: e\n  - c: d\n".equals(yaml));
@@ -325,7 +420,7 @@ public class EnvironmentControllerTests {
 		this.environment.add(new PropertySource("one", map));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		String expected = // @formatter:off
 				"a:\n" +
 				"  b:\n" +
@@ -355,7 +450,7 @@ public class EnvironmentControllerTests {
 		this.environment.add(new PropertySource("one", map));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String json = this.controller.jsonProperties("foo", "bar", false).getBody();
+		String json = this.controller.jsonProperties("foo", "bar", false, null).getBody();
 		assertThat("Wrong output: " + json, json, is(
 				"{\"a\":{\"b\":[{\"c\":\"x\",\"d\":[\"xx\",\"yy\"]},{\"c\":\"y\",\"e\":[{\"d\":\"z\"}]}]}}"));
 	}
@@ -368,7 +463,7 @@ public class EnvironmentControllerTests {
 		this.environment.add(new PropertySource("one", map));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertEquals("b:\n- c: d\n- c: d\n", yaml);
 	}
 
@@ -380,21 +475,21 @@ public class EnvironmentControllerTests {
 		this.environment.add(new PropertySource("one", map));
 		Mockito.when(this.repository.findOne("foo", "bar", null))
 				.thenReturn(this.environment);
-		String yaml = this.controller.yaml("foo", "bar", false).getBody();
+		String yaml = this.controller.yaml("foo", "bar", false, null).getBody();
 		assertEquals("x:\n  a:\n    b:\n    - c: d\n    - c: d\n", yaml);
 	}
 
 	@Test
 	public void placeholdersResolvedInProperties() throws Exception {
 		whenPlaceholders();
-		String text = this.controller.properties("foo", "bar", true).getBody();
+		String text = this.controller.properties("foo", "bar", true, null).getBody();
 		assertEquals("a.b.c: bar\nfoo: bar", text);
 	}
 
 	@Test
 	public void placeholdersNotResolvedInProperties() throws Exception {
 		whenPlaceholders();
-		String text = this.controller.properties("foo", "bar", false).getBody();
+		String text = this.controller.properties("foo", "bar", false, null).getBody();
 		assertEquals("a.b.c: ${foo}\nfoo: bar", text);
 	}
 
@@ -402,7 +497,7 @@ public class EnvironmentControllerTests {
 	public void placeholdersNotResolvedInPropertiesFromSystemProperties()
 			throws Exception {
 		whenPlaceholdersSystemProps();
-		String text = this.controller.properties("foo", "bar", true).getBody();
+		String text = this.controller.properties("foo", "bar", true, null).getBody();
 		assertEquals("a.b.c: ${foo}", text);
 	}
 
@@ -410,7 +505,7 @@ public class EnvironmentControllerTests {
 	public void placeholdersNotResolvedInPropertiesFromSystemPropertiesWhenNotFlagged()
 			throws Exception {
 		whenPlaceholdersSystemProps();
-		String text = this.controller.properties("foo", "bar", false).getBody();
+		String text = this.controller.properties("foo", "bar", false, null).getBody();
 		assertEquals("a.b.c: ${foo}", text);
 	}
 
@@ -418,28 +513,28 @@ public class EnvironmentControllerTests {
 	public void placeholdersNotResolvedInPropertiesFromSystemPropertiesWhenNotFlaggedWithDefault()
 			throws Exception {
 		whenPlaceholdersSystemPropsWithDefault();
-		String text = this.controller.properties("foo", "bar", false).getBody();
+		String text = this.controller.properties("foo", "bar", false, null).getBody();
 		assertEquals("a.b.c: ${foo:spam}", text);
 	}
 
 	@Test
 	public void placeholdersResolvedInJson() throws Exception {
 		whenPlaceholders();
-		String json = this.controller.jsonProperties("foo", "bar", true).getBody();
+		String json = this.controller.jsonProperties("foo", "bar", true, null).getBody();
 		assertEquals("{\"a\":{\"b\":{\"c\":\"bar\"}},\"foo\":\"bar\"}", json);
 	}
 
 	@Test
 	public void placeholdersNotResolvedInJson() throws Exception {
 		whenPlaceholders();
-		String json = this.controller.jsonProperties("foo", "bar", false).getBody();
+		String json = this.controller.jsonProperties("foo", "bar", false, null).getBody();
 		assertEquals("{\"a\":{\"b\":{\"c\":\"${foo}\"}},\"foo\":\"bar\"}", json);
 	}
 
 	@Test
 	public void placeholdersNotResolvedInJsonFromSystemProperties() throws Exception {
 		whenPlaceholdersSystemProps();
-		String json = this.controller.jsonProperties("foo", "bar", true).getBody();
+		String json = this.controller.jsonProperties("foo", "bar", true, null).getBody();
 		assertEquals("{\"a\":{\"b\":{\"c\":\"${foo}\"}}}", json);
 	}
 
@@ -447,7 +542,7 @@ public class EnvironmentControllerTests {
 	public void placeholdersNotResolvedInJsonFromSystemPropertiesWhenNotFlagged()
 			throws Exception {
 		whenPlaceholdersSystemProps();
-		String json = this.controller.jsonProperties("foo", "bar", false).getBody();
+		String json = this.controller.jsonProperties("foo", "bar", false, null).getBody();
 		assertEquals("{\"a\":{\"b\":{\"c\":\"${foo}\"}}}", json);
 	}
 
@@ -455,7 +550,7 @@ public class EnvironmentControllerTests {
 	public void placeholdersNotResolvedInJsonFromSystemPropertiesWhenNotFlaggedWithDefault()
 			throws Exception {
 		whenPlaceholdersSystemPropsWithDefault();
-		String json = this.controller.jsonProperties("foo", "bar", false).getBody();
+		String json = this.controller.jsonProperties("foo", "bar", false, null).getBody();
 		// If there is a default value we prevent the placeholder being resolved
 		assertEquals("{\"a\":{\"b\":{\"c\":\"${foo:spam}\"}}}", json);
 	}
@@ -464,7 +559,7 @@ public class EnvironmentControllerTests {
 	public void placeholdersResolvedInJsonFromSystemPropertiesWhenFlagged()
 			throws Exception {
 		whenPlaceholdersSystemPropsWithDefault();
-		String json = this.controller.jsonProperties("foo", "bar", true).getBody();
+		String json = this.controller.jsonProperties("foo", "bar", true, null).getBody();
 		// If there is a default value we do not prevent the placeholder being resolved
 		assertEquals("{\"a\":{\"b\":{\"c\":\"spam\"}}}", json);
 	}

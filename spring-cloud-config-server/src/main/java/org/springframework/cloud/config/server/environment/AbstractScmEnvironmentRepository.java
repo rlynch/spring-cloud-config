@@ -23,12 +23,13 @@ import org.springframework.core.env.ConfigurableEnvironment;
 
 /**
  * @author Dave Syer
+ * @author Ryan Lynch
  *
  */
 public abstract class AbstractScmEnvironmentRepository extends AbstractScmAccessor
 		implements EnvironmentRepository, SearchPathLocator, Ordered {
 
-	private EnvironmentCleaner cleaner = new EnvironmentCleaner();
+	protected EnvironmentCleaner cleaner = new EnvironmentCleaner();
 	private int order = Ordered.LOWEST_PRECEDENCE;
 
 	public AbstractScmEnvironmentRepository(ConfigurableEnvironment environment) {

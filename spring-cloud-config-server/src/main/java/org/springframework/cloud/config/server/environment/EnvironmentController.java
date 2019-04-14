@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.TreeMap;
 
 import javax.servlet.http.HttpServletResponse;
@@ -40,8 +41,10 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -59,6 +62,7 @@ import static org.springframework.cloud.config.server.support.EnvironmentPropert
  * @author Ivan Corrales Solera
  * @author Daniel Frey
  * @author Ian Bondoc
+ * @author Ryan Lynch
  *
  */
 @RestController
@@ -101,14 +105,28 @@ public class EnvironmentController {
 	}
 	
 	@RequestMapping("/{name}/{profiles:.*[^-].*}")
-	public Environment defaultLabel(@PathVariable String name,
-			@PathVariable String profiles) {
-		return labelled(name, profiles, null);
+	public ResponseEntity<Environment> defaultLabel(@PathVariable String name,
+													@PathVariable String profiles,
+													@RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String eTagIfNoneMatch) {
+		return labelled(name, profiles, null, eTagIfNoneMatch);
 	}
 
 	@RequestMapping("/{name}/{profiles}/{label:.*}")
-	public Environment labelled(@PathVariable String name, @PathVariable String profiles,
-			@PathVariable String label) {
+	public ResponseEntity<Environment> labelled(@PathVariable String name, @PathVariable String profiles,
+												@PathVariable String label,
+												@RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String eTagIfNoneMatch) {
+		Environment environment = retrieveEnvironment(name, profiles, label, eTagIfNoneMatch);
+		if(returnNotModified(environment, eTagIfNoneMatch)) {
+			return new ResponseEntity<>(HttpStatus.NOT_MODIFIED);
+		}else{
+			HttpHeaders httpHeaders = new HttpHeaders();
+			if(environment != null) {
+				httpHeaders.setETag(getWeakEtagFromVersion(environment.getVersion()));
+			}
+			return new ResponseEntity<>(environment, httpHeaders, HttpStatus.OK);
+		}
+	}
+	private Environment retrieveEnvironment(String name, String profiles, String label, String eTagIfNoneMatch) {
 		if (name != null && name.contains("(_)")) {
 			// "(_)" is uncommon in a git repo name, but "/" cannot be matched
 			// by Spring MVC
@@ -119,58 +137,74 @@ public class EnvironmentController {
 			// by Spring MVC
 			label = label.replace("(_)", "/");
 		}
-		Environment environment = this.repository.findOne(name, profiles, label);
+		String version = getVersionFromWeakEtag(eTagIfNoneMatch);
+		Environment environment;
+		if(this.repository instanceof VersionedEnvironmentRepository && StringUtils.hasText(version)) {
+			environment= ((VersionedEnvironmentRepository)this.repository).findOne(name, profiles, label, version);
+		}else{
+			environment = this.repository.findOne(name, profiles, label);
+		}
 		if(!acceptEmpty && (environment == null || environment.getPropertySources().isEmpty())){
-			 throw new EnvironmentNotFoundException("Profile Not found");
+			throw new EnvironmentNotFoundException("Profile Not found");
 		}
 		return environment;
 	}
 
 	@RequestMapping("/{name}-{profiles}.properties")
 	public ResponseEntity<String> properties(@PathVariable String name,
-			@PathVariable String profiles,
-			@RequestParam(defaultValue = "true") boolean resolvePlaceholders)
+											 @PathVariable String profiles,
+											 @RequestParam(defaultValue = "true") boolean resolvePlaceholders,
+											 @RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String eTagIfNoneMatch)
 			throws IOException {
-		return labelledProperties(name, profiles, null, resolvePlaceholders);
+		return labelledProperties(name, profiles, null, resolvePlaceholders, eTagIfNoneMatch);
 	}
 
 	@RequestMapping("/{label}/{name}-{profiles}.properties")
 	public ResponseEntity<String> labelledProperties(@PathVariable String name,
-			@PathVariable String profiles, @PathVariable String label,
-			@RequestParam(defaultValue = "true") boolean resolvePlaceholders)
+													 @PathVariable String profiles, @PathVariable String label,
+													 @RequestParam(defaultValue = "true") boolean resolvePlaceholders,
+													 @RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String eTagIfNoneMatch)
 			throws IOException {
 		validateProfiles(profiles);
-		Environment environment = labelled(name, profiles, label);
+		Environment environment = retrieveEnvironment(name, profiles, label, eTagIfNoneMatch);
+		if(returnNotModified(environment, eTagIfNoneMatch)) {
+			return new ResponseEntity<>(HttpStatus.NOT_MODIFIED);
+		}
 		Map<String, Object> properties = convertToProperties(environment);
 		String propertiesString = getPropertiesString(properties);
 		if (resolvePlaceholders) {
 			propertiesString = resolvePlaceholders(prepareEnvironment(environment),
 					propertiesString);
 		}
-		return getSuccess(propertiesString);
+		return getSuccess(propertiesString, environment.getVersion());
 	}
 
 	@RequestMapping("{name}-{profiles}.json")
 	public ResponseEntity<String> jsonProperties(@PathVariable String name,
-			@PathVariable String profiles,
-			@RequestParam(defaultValue = "true") boolean resolvePlaceholders)
+												 @PathVariable String profiles,
+												 @RequestParam(defaultValue = "true") boolean resolvePlaceholders,
+												 @RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String eTagIfNoneMatch)
 			throws Exception {
-		return labelledJsonProperties(name, profiles, null, resolvePlaceholders);
+		return labelledJsonProperties(name, profiles, null, resolvePlaceholders, eTagIfNoneMatch);
 	}
 
 	@RequestMapping("/{label}/{name}-{profiles}.json")
 	public ResponseEntity<String> labelledJsonProperties(@PathVariable String name,
-			@PathVariable String profiles, @PathVariable String label,
-			@RequestParam(defaultValue = "true") boolean resolvePlaceholders)
+														 @PathVariable String profiles, @PathVariable String label,
+														 @RequestParam(defaultValue = "true") boolean resolvePlaceholders,
+														 @RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String eTagIfNoneMatch)
 			throws Exception {
 		validateProfiles(profiles);
-		Environment environment = labelled(name, profiles, label);
+		Environment environment = retrieveEnvironment(name, profiles, label, eTagIfNoneMatch);
+		if(returnNotModified(environment, eTagIfNoneMatch)) {
+			return new ResponseEntity<>(HttpStatus.NOT_MODIFIED);
+		}
 		Map<String, Object> properties = convertToMap(environment);
 		String json = this.objectMapper.writeValueAsString(properties);
 		if (resolvePlaceholders) {
 			json = resolvePlaceholders(prepareEnvironment(environment), json);
 		}
-		return getSuccess(json, MediaType.APPLICATION_JSON);
+		return getSuccess(json, MediaType.APPLICATION_JSON, environment.getVersion());
 	}
 
 	private String getPropertiesString(Map<String, Object> properties) {
@@ -187,29 +221,34 @@ public class EnvironmentController {
 
 	@RequestMapping({ "/{name}-{profiles}.yml", "/{name}-{profiles}.yaml" })
 	public ResponseEntity<String> yaml(@PathVariable String name,
-			@PathVariable String profiles,
-			@RequestParam(defaultValue = "true") boolean resolvePlaceholders)
+									   @PathVariable String profiles,
+									   @RequestParam(defaultValue = "true") boolean resolvePlaceholders,
+									   @RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String eTagIfNoneMatch)
 			throws Exception {
-		return labelledYaml(name, profiles, null, resolvePlaceholders);
+		return labelledYaml(name, profiles, null, resolvePlaceholders, eTagIfNoneMatch);
 	}
 
 	@RequestMapping({ "/{label}/{name}-{profiles}.yml",
 			"/{label}/{name}-{profiles}.yaml" })
 	public ResponseEntity<String> labelledYaml(@PathVariable String name,
-			@PathVariable String profiles, @PathVariable String label,
-			@RequestParam(defaultValue = "true") boolean resolvePlaceholders)
+											   @PathVariable String profiles, @PathVariable String label,
+											   @RequestParam(defaultValue = "true") boolean resolvePlaceholders,
+											   @RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String eTagIfNoneMatch)
 			throws Exception {
 		validateProfiles(profiles);
-		Environment environment = labelled(name, profiles, label);
+		Environment environment = retrieveEnvironment(name, profiles, label, eTagIfNoneMatch);
+		if(returnNotModified(environment, eTagIfNoneMatch)) {
+			return new ResponseEntity<>(HttpStatus.NOT_MODIFIED);
+		}
 		Map<String, Object> result = convertToMap(environment);
 		if (this.stripDocument && result.size() == 1
 				&& result.keySet().iterator().next().equals("document")) {
 			Object value = result.get("document");
 			if (value instanceof Collection) {
-				return getSuccess(new Yaml().dumpAs(value, Tag.SEQ, FlowStyle.BLOCK));
+				return getSuccess(new Yaml().dumpAs(value, Tag.SEQ, FlowStyle.BLOCK), environment.getVersion());
 			}
 			else {
-				return getSuccess(new Yaml().dumpAs(value, Tag.STR, FlowStyle.BLOCK));
+				return getSuccess(new Yaml().dumpAs(value, Tag.STR, FlowStyle.BLOCK), environment.getVersion());
 			}
 		}
 		String yaml = new Yaml().dumpAsMap(result);
@@ -218,7 +257,7 @@ public class EnvironmentController {
 			yaml = resolvePlaceholders(prepareEnvironment(environment), yaml);
 		}
 
-		return getSuccess(yaml);
+		return getSuccess(yaml, environment.getVersion());
 	}
 
 	/**
@@ -259,19 +298,47 @@ public class EnvironmentController {
 		}
 	}
 
-	private HttpHeaders getHttpHeaders(MediaType mediaType) {
+	/** Returns true if eTagIfNoneMatch contains a single Weak ETag value that matches the environment's version */
+	private boolean returnNotModified(Environment environment, String eTagIfNoneMatch) {
+		if(environment != null && StringUtils.hasText(eTagIfNoneMatch) && this.repository instanceof VersionedEnvironmentRepository) {
+			String version = getVersionFromWeakEtag(eTagIfNoneMatch);
+			if(Objects.equals(version, environment.getVersion())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** This only handles the case of a single (Weak) ETag value, though If-None-Match permits a list */
+	static String getVersionFromWeakEtag(String eTagIfNoneMatch) {
+		if(StringUtils.hasText(eTagIfNoneMatch) && eTagIfNoneMatch.startsWith("W/\"") && eTagIfNoneMatch.endsWith("\"")) {
+			return eTagIfNoneMatch.substring(3, eTagIfNoneMatch.length() - 1);
+		}else {
+			//invalid or Strong eTag
+			return null;
+		}
+	}
+
+	static String getWeakEtagFromVersion(String version) {
+		return "W/\"" + version + '\"';
+	}
+
+	private HttpHeaders getHttpHeaders(MediaType mediaType, String version) {
 		HttpHeaders httpHeaders = new HttpHeaders();
 		httpHeaders.setContentType(mediaType);
+		if(this.repository instanceof VersionedEnvironmentRepository && StringUtils.hasText(version)) {
+			httpHeaders.setETag(getWeakEtagFromVersion(version));
+		}
 		return httpHeaders;
 	}
 
-	private ResponseEntity<String> getSuccess(String body) {
-		return new ResponseEntity<>(body, getHttpHeaders(MediaType.TEXT_PLAIN),
+	private ResponseEntity<String> getSuccess(String body, String version) {
+		return new ResponseEntity<>(body, getHttpHeaders(MediaType.TEXT_PLAIN, version),
 				HttpStatus.OK);
 	}
 
-	private ResponseEntity<String> getSuccess(String body, MediaType mediaType) {
-		return new ResponseEntity<>(body, getHttpHeaders(mediaType), HttpStatus.OK);
+	private ResponseEntity<String> getSuccess(String body, MediaType mediaType, String version) {
+		return new ResponseEntity<>(body, getHttpHeaders(mediaType, version), HttpStatus.OK);
 	}
 
 	private Map<String, Object> convertToProperties(Environment profiles) {
